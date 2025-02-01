@@ -8,7 +8,11 @@ extends Node3D
 @export var hill_frequency : float = 0.1
 @export var valley_threshold : float = 0.3
 @export var max_height : float = 5.0
+@export var octaves : int = 4
+@export var lacunarity : float = 2.0
+@export var gain : float = 0.5
 
+var xr_interface : XRInterface
 var noise = FastNoiseLite.new()
 var mesh_instance : MeshInstance3D
 var st = SurfaceTool.new()
@@ -35,6 +39,7 @@ func terain_height(x: float, z: float) -> float:
 func build_terrain(x_origin: float, z_origin: float) -> void:
 	st.clear()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	st.set_smooth_group(true)
 
 	var x_start : float = x_origin - x_size / 2
 	var x_end : float = x_origin + x_size / 2
@@ -96,12 +101,17 @@ func _ready() -> void:
 	# Initialize noise
 	noise.seed = randi()
 	noise.frequency = hill_frequency
-	noise.fractal_octaves = 4
-	noise.fractal_lacunarity = 2.0
-	noise.fractal_gain = 0.5
+	noise.fractal_octaves = octaves
+	noise.fractal_lacunarity = lacunarity
+	noise.fractal_gain = gain
 	
 	# Generate initial terrain    
 	build_terrain(0, 0)
+
+	#Initialize VR stuff
+	xr_interface = XRServer.find_interface("OpenXR")
+	if xr_interface and xr_interface.is_initialized():
+		get_viewport().use_xr = true
 
 func _process(_delta: float) -> void:
 	pass
