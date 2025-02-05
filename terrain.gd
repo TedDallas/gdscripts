@@ -7,7 +7,6 @@ extends Node3D
 @export var height_std_dev : float = 1.5
 @export var hill_frequency : float = 0.1
 @export var valley_threshold : float = 0.3
-#@export var max_height : float = 5.0
 @export var octaves : int = 4
 @export var lacunarity : float = 2.0
 @export var gain : float = 0.5
@@ -17,6 +16,7 @@ var noise = FastNoiseLite.new()
 var terrain_tiles = {}  # Dictionary to store terrain tiles
 var current_center_tile = Vector2.ZERO
 var xr_origin : XROrigin3D
+var terrain_material : StandardMaterial3D 
 
 # Add a buffer zone to prevent reaching tile edges
 const TILE_BUFFER : float = 0.2  # 20% buffer from edges
@@ -28,8 +28,9 @@ func gaussian_random() -> float:
 	return z0
 
 func terain_height(x: float, z: float) -> float:
-	var world_x = x * terrain_scale
-	var world_z = z * terrain_scale
+	# Remove any tile-specific modifications to coordinates
+	var world_x = x
+	var world_z = z
 	
 	var noise_value = noise.get_noise_2d(world_x, world_z)
 	noise_value = (noise_value + 1.0) * 0.5
@@ -42,18 +43,14 @@ func terain_height(x: float, z: float) -> float:
 	else:
 		noise_value = pow((noise_value - valley_threshold) / (1.0 - valley_threshold), 2.0)
 
-	#var height = noise_value * max_height * height_mean
-	var height = noise_value * height_mean
-	#return clamp(height, 0.0, max_height)
-	return height
+	return noise_value * height_mean
 
 
 func create_noise_texture() -> NoiseTexture2D:
 	var noise_texture = NoiseTexture2D.new()
 	
-	# Create and configure noise
 	var noise = FastNoiseLite.new()
-	noise.seed = randi()  # Random seed, or use a specific number
+	noise.seed = randi()
 	noise.noise_type = FastNoiseLite.TYPE_PERLIN
 	noise.frequency = 0.05
 	noise.fractal_type = FastNoiseLite.FRACTAL_FBM
@@ -61,90 +58,95 @@ func create_noise_texture() -> NoiseTexture2D:
 	noise.fractal_lacunarity = 2.0
 	noise.fractal_gain = 0.5
 	
-	# Configure the noise texture
-	noise_texture.width = 512  # Texture resolution
-	noise_texture.height = 512
+	noise_texture.width = 1024  # Increased resolution
+	noise_texture.height = 1024
 	noise_texture.noise = noise
-	noise_texture.seamless = true  # Important for tiling
-	noise_texture.seamless_blend_skirt = 0.1
+	noise_texture.seamless = true
+	noise_texture.seamless_blend_skirt = 0.25  # Increased blend skirt
+	noise_texture.as_normal_map = true  # Enable normal mapping
 
 	return noise_texture
+
+func create_terrain_material() -> StandardMaterial3D:
+	var material = StandardMaterial3D.new()
+
+	# Updated material settings
+	material.vertex_color_use_as_albedo = true
+	material.albedo_color = Color(1.0, 0.6, 0.3, 1.0)
+	material.roughness = 0.0
+	material.cull_mode = BaseMaterial3D.CULL_BACK
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_PER_VERTEX
+	material.metallic_specular = 0.1
+	
+	# Improved texture settings
+	var noise_texture = create_noise_texture()
+	material.albedo_texture = noise_texture
+	material.normal_enabled = true
+	material.normal_scale = 1.0
+	material.roughness_texture = noise_texture
+	
+	# Enhanced triplanar mapping settings
+	material.uv1_triplanar = true
+	material.uv1_world_triplanar = true
+	material.uv1_scale = Vector3.ONE
+	
+	# Add texture repeat
+	material.uv1_scale = Vector3(0.01, 0.01, 0.01)
+	material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	material.texture_repeat = true
+	
+	return material
 
 func build_terrain_tile(tile_coords: Vector2) -> MeshInstance3D:
 	var st = SurfaceTool.new()
 	st.clear()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 
-	# Calculate tile position with proper centering
 	var x_origin = tile_coords.x * x_size * terrain_scale
 	var z_origin = tile_coords.y * z_size * terrain_scale
-	var x_start : float = -x_size / 2
-	var x_end : float = x_size / 2
-	var z_start : float = -z_size / 2
-	var z_end : float = z_size / 2
-
-	# Generate vertices with proper positioning and UVs
-	for x in range(x_start, x_end + 1):
-		for z in range(z_start, z_end + 1):
-			var world_x = x_origin + (x * terrain_scale)
-			var world_z = z_origin + (z * terrain_scale)
+	const OVERLAP = 1
+	
+	var vertices_x = int(x_size) + 1 + (2 * OVERLAP)
+	var vertices_z = int(z_size) + 1 + (2 * OVERLAP)
+	
+	# Generate vertices
+	for x in range(vertices_x):
+		for z in range(vertices_z):
+			var world_x = x_origin + ((x - OVERLAP - x_size/2) * terrain_scale)
+			var world_z = z_origin + ((z - OVERLAP - z_size/2) * terrain_scale)
 			var height = terain_height(world_x / terrain_scale, world_z / terrain_scale)
 			var vertex = Vector3(world_x, height * terrain_scale, world_z)
-			
-			# Calculate UV coordinates
-			var u = (x - x_start) / float(x_end - x_start)
-			var v = (z - z_start) / float(z_end - z_start)
+
+			var u = (float(x) / (vertices_x - 1))
+			var v = (float(z) / (vertices_z - 1))
 			st.set_uv(Vector2(u, v))
 			
-			# Calculate vertex color based on height
-			var color = Color(1.0, 1.0, 1.0)
-			st.set_color(color)
-			
+			st.set_color(Color(1.0, 1.0, 1.0))
 			st.add_vertex(vertex)
 
 	# Generate triangles
-	for x in range(x_end - x_start):
-		for z in range(z_end - z_start):
-			var vertex_index = z + x * (z_size + 1)
+	for x in range(vertices_x - 1):
+		for z in range(vertices_z - 1):
+			var i = z + x * vertices_z
 			
-			st.add_index(vertex_index)
-			st.add_index(vertex_index + z_size + 1)
-			st.add_index(vertex_index + 1)
+			st.add_index(i)
+			st.add_index(i + vertices_z)
+			st.add_index(i + 1)
 			
-			st.add_index(vertex_index + 1)
-			st.add_index(vertex_index + z_size + 1)
-			st.add_index(vertex_index + z_size + 2)
+			st.add_index(i + 1)
+			st.add_index(i + vertices_z)
+			st.add_index(i + vertices_z + 1)
 
 	st.generate_normals()
 	st.generate_tangents()
 
 	var mesh_instance = MeshInstance3D.new()
-	var material = StandardMaterial3D.new()
-	
-	# Configure material properties
-	material.cull_mode = BaseMaterial3D.CULL_BACK
-	material.shading_mode = BaseMaterial3D.SHADING_MODE_PER_VERTEX
-	material.roughness = 0.8
-	material.metallic_specular = 0.1
-	material.albedo_color = Color(1.0, 0.6, 0.3, 1.0)
-	
-	# Add noise texture to the material
-	var noise_texture = create_noise_texture()
-	material.albedo_texture = noise_texture
-	material.normal_enabled = true
-	material.normal_scale = 1.0
-	material.roughness_texture = noise_texture	
-	
-	# Enable triplanar mapping to help with seams
-	material.uv1_triplanar = true
-	material.uv1_world_triplanar = true
-	material.uv1_scale = Vector3(1.0 / terrain_scale, 1.0 / terrain_scale, 1.0 / terrain_scale)
-	
-	mesh_instance.mesh = st.commit()
-	mesh_instance.material_override = material
-	add_child(mesh_instance)
-	return mesh_instance
+	#var material = StandardMaterial3D.new()
 
+	mesh_instance.mesh = st.commit()
+	mesh_instance.material_override = terrain_material
+	add_child(mesh_instance)  # Add this line
+	return mesh_instance
 
 func get_tile_coords(position: Vector3) -> Vector2:
 	var tile_size = Vector2(x_size * terrain_scale, z_size * terrain_scale)
@@ -203,6 +205,8 @@ func _ready() -> void:
 	noise.fractal_lacunarity = lacunarity
 	noise.fractal_gain = gain
 	
+	terrain_material = create_terrain_material()
+	
 	xr_origin = get_node("./player/XROrigin3D")
 	
 	# Generate initial terrain tiles
@@ -217,4 +221,3 @@ func _ready() -> void:
 
 func _process(_delta: float) -> void:
 	update_terrain_tiles()
-
