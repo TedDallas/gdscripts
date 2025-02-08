@@ -1,5 +1,8 @@
 extends Node3D
 
+@export var x_tiles : int = 3
+@export var y_tiles : int = 3
+
 @export var x_size : float = 64
 @export var z_size : float = 64
 @export var terrain_scale : float = 100
@@ -72,7 +75,7 @@ func create_terrain_material() -> StandardMaterial3D:
 
 	# Updated material settings
 	material.vertex_color_use_as_albedo = true
-	material.albedo_color = Color(1.0, 0.6, 0.3, 1.0)
+	material.albedo_color = Color(randf(), randf(), randf(), 1.0)
 	material.roughness = 0.0
 	material.cull_mode = BaseMaterial3D.CULL_BACK
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_PER_VERTEX
@@ -182,7 +185,7 @@ func update_terrain_tiles() -> void:
 		# Remove old tiles
 		var tiles_to_remove = []
 		for tile_coords in terrain_tiles.keys():
-			if abs(tile_coords.x - new_center_tile.x) > 1 or abs(tile_coords.y - new_center_tile.y) > 1:
+			if abs(tile_coords.x - new_center_tile.x) > x_tiles/2 or abs(tile_coords.y - new_center_tile.y) > y_tiles/2:
 				tiles_to_remove.append(tile_coords)
 		
 		for tile_coords in tiles_to_remove:
@@ -190,13 +193,13 @@ func update_terrain_tiles() -> void:
 			terrain_tiles.erase(tile_coords)
 		
 		# Add new tiles
-		for x in range(new_center_tile.x - 1, new_center_tile.x + 2):
-			for y in range(new_center_tile.y - 1, new_center_tile.y + 2):
+		for x in range(new_center_tile.x - x_tiles/2, new_center_tile.x + x_tiles/2 + 1):
+			for y in range(new_center_tile.y - y_tiles/2, new_center_tile.y + y_tiles/2 + 1):
 				var tile_coords = Vector2(x, y)
 				if not terrain_tiles.has(tile_coords):
 					terrain_tiles[tile_coords] = build_terrain_tile(tile_coords)
-		
-		current_center_tile = new_center_tile
+
+	current_center_tile = new_center_tile
 
 func _ready() -> void:
 	noise.seed = 12345
@@ -210,8 +213,11 @@ func _ready() -> void:
 	xr_origin = get_node("./player/XROrigin3D")
 	
 	# Generate initial terrain tiles
-	for x in range(-1, 2):
-		for y in range(-1, 2):
+	var half_x = x_tiles / 2
+	var half_y = y_tiles / 2
+	
+	for x in range(-half_x, half_x + 1):
+		for y in range(-half_y, half_y + 1):
 			var tile_coords = Vector2(x, y)
 			terrain_tiles[tile_coords] = build_terrain_tile(tile_coords)
 	
