@@ -2,7 +2,7 @@ extends Node3D
 
 @export var x_tiles : int = 3
 @export var y_tiles : int = 3
-
+@export var collision_radius : float = 64.0 
 @export var x_size : float = 64
 @export var z_size : float = 64
 @export var terrain_scale : float = 100
@@ -13,6 +13,7 @@ extends Node3D
 @export var octaves : int = 4
 @export var lacunarity : float = 2.0
 @export var gain : float = 0.5
+@export var terain_color : Color;
 
 var xr_interface : XRInterface
 var noise = FastNoiseLite.new()
@@ -48,22 +49,48 @@ func terain_height(x: float, z: float) -> float:
 
 	return noise_value * height_mean
 
+func update_collision_states(player_position: Vector3) -> void:
+	var player_tile = get_tile_coords(player_position)
+	
+	for tile_coords in terrain_tiles.keys():
+		# Quick check if tile is definitely outside radius
+		if (abs(tile_coords.x - player_tile.x) > collision_radius / (x_size * terrain_scale) or 
+			abs(tile_coords.y - player_tile.y) > collision_radius / (z_size * terrain_scale)):
+			# Disable collision without precise distance check
+			for child in terrain_tiles[tile_coords].get_children():
+				if child is CollisionShape3D:
+					child.disabled = true
+			continue
+		
+		# Precise distance check for tiles that might be in range
+		var tile = terrain_tiles[tile_coords]
+		var tile_center = Vector3(
+			tile_coords.x * x_size * terrain_scale,
+			0,
+			tile_coords.y * z_size * terrain_scale
+		)
+		
+		var distance = player_position.distance_to(tile_center)
+		
+		for child in tile.get_children():
+			if child is CollisionShape3D:
+				child.disabled = distance > collision_radius
 
 func create_noise_texture() -> NoiseTexture2D:
 	var noise_texture = NoiseTexture2D.new()
 	
-	var noise = FastNoiseLite.new()
-	noise.seed = randi()
-	noise.noise_type = FastNoiseLite.TYPE_PERLIN
-	noise.frequency = 0.05
-	noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	noise.fractal_octaves = 4
-	noise.fractal_lacunarity = 2.0
-	noise.fractal_gain = 0.5
+	var nz = FastNoiseLite.new()
+	nz.seed = randi()
+	nz.noise_type = FastNoiseLite.TYPE_PERLIN
+	nz.frequency = 0.05
+	nz.fractal_type = FastNoiseLite.FRACTAL_FBM
+	nz.fractal_octaves = 4
+	nz.fractal_lacunarity = 2.0
+	nz.fractal_gain = 0.5
 	
 	noise_texture.width = 1024  # Increased resolution
 	noise_texture.height = 1024
-	noise_texture.noise = noise
+	noise_texture.noise = nz
 	noise_texture.seamless = true
 	noise_texture.seamless_blend_skirt = 0.25  # Increased blend skirt
 	noise_texture.as_normal_map = true  # Enable normal mapping
@@ -75,7 +102,7 @@ func create_terrain_material() -> StandardMaterial3D:
 
 	# Updated material settings
 	material.vertex_color_use_as_albedo = true
-	material.albedo_color = Color(randf(), randf(), randf(), 1.0)
+	material.albedo_color = terain_color #Color(randf(), randf(), randf(), 1.0)
 	material.roughness = 0.0
 	material.cull_mode = BaseMaterial3D.CULL_BACK
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_PER_VERTEX
@@ -100,7 +127,7 @@ func create_terrain_material() -> StandardMaterial3D:
 	
 	return material
 
-func build_terrain_tile(tile_coords: Vector2) -> MeshInstance3D:
+func build_terrain_tile(tile_coords: Vector2) -> StaticBody3D:
 	var st = SurfaceTool.new()
 	st.clear()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -143,13 +170,25 @@ func build_terrain_tile(tile_coords: Vector2) -> MeshInstance3D:
 	st.generate_normals()
 	st.generate_tangents()
 
+	var static_body = StaticBody3D.new()
 	var mesh_instance = MeshInstance3D.new()
-	#var material = StandardMaterial3D.new()
-
+	
 	mesh_instance.mesh = st.commit()
 	mesh_instance.material_override = terrain_material
-	add_child(mesh_instance)  # Add this line
-	return mesh_instance
+	
+	# Create collision shape
+	var collision_shape = CollisionShape3D.new()
+	var shape = ConcavePolygonShape3D.new()
+	shape.set_faces(mesh_instance.mesh.get_faces())
+	collision_shape.shape = shape
+
+	# Add both mesh and collision to the static body
+	static_body.add_child(mesh_instance)
+	static_body.add_child(collision_shape)
+	add_child(static_body)
+	
+	return static_body
+
 
 func get_tile_coords(position: Vector3) -> Vector2:
 	var tile_size = Vector2(x_size * terrain_scale, z_size * terrain_scale)
@@ -191,6 +230,11 @@ func update_terrain_tiles() -> void:
 		for tile_coords in tiles_to_remove:
 			terrain_tiles[tile_coords].queue_free()
 			terrain_tiles.erase(tile_coords)
+
+		for tile_coords in tiles_to_remove:
+			if terrain_tiles.has(tile_coords):
+				terrain_tiles[tile_coords].queue_free()
+				terrain_tiles.erase(tile_coords)
 		
 		# Add new tiles
 		for x in range(new_center_tile.x - x_tiles/2, new_center_tile.x + x_tiles/2 + 1):
@@ -203,13 +247,20 @@ func update_terrain_tiles() -> void:
 
 func setup_sky():
 	var environment = Environment.new()
+	environment.fog_enabled = true
+	environment.fog_density = 0.0075  
+	environment.fog_light_color = terain_color 
+	environment.fog_light_energy = 0.1
+	environment.fog_sun_scatter = 0.0  # Light scattering amount	
+	
 	var sky = Sky.new()
 	var sky_material = ProceduralSkyMaterial.new()
 	
 	sky_material.sky_top_color = Color.BLACK
-	sky_material.sky_horizon_color = Color.DIM_GRAY
+	sky_material.sky_horizon_color = terain_color
 	
 	sky.sky_material = sky_material
+	
 	environment.sky = sky
 	environment.background_mode = Environment.BG_SKY
 	
@@ -243,3 +294,4 @@ func _ready() -> void:
 
 func _process(_delta: float) -> void:
 	update_terrain_tiles()
+	update_collision_states(xr_origin.global_position)
