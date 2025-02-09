@@ -201,6 +201,20 @@ func update_terrain_tiles() -> void:
 
 	current_center_tile = new_center_tile
 
+func setup_sky():
+	var environment = Environment.new()
+	var sky = Sky.new()
+	var sky_material = ProceduralSkyMaterial.new()
+	
+	sky_material.sky_top_color = Color.BLACK
+	sky_material.sky_horizon_color = Color.DIM_GRAY
+	
+	sky.sky_material = sky_material
+	environment.sky = sky
+	environment.background_mode = Environment.BG_SKY
+	
+	get_viewport().world_3d.environment = environment
+
 func _ready() -> void:
 	noise.seed = 12345
 	noise.frequency = hill_frequency
@@ -211,6 +225,8 @@ func _ready() -> void:
 	terrain_material = create_terrain_material()
 	
 	xr_origin = get_node("./player/XROrigin3D")
+	
+	setup_sky()
 	
 	# Generate initial terrain tiles
 	var half_x = x_tiles / 2
