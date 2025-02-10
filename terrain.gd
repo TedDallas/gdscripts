@@ -36,6 +36,8 @@ var current_center_tile = Vector2.ZERO
 var xr_origin : XROrigin3D
 var terrain_material : StandardMaterial3D 
 
+const MAX_QUEUE_SIZE = 32
+
 var thread_queue := []
 var active_threads := []
 const MAX_THREADS := 4
@@ -220,23 +222,27 @@ func _create_terrain_node(result: Dictionary) -> void:
 
 func _thread_completed(result: Dictionary) -> void:
 	call_deferred("_create_terrain_node", result)
-	
+
+func get_tile_priority(tile_coords: Vector2) -> float:
+	var distance = tile_coords.distance_to(current_center_tile)
+	return -distance  # Higher priority for closer tiles
+
 func _process_thread_queue() -> void:
 	mutex.lock()
-	var thread_count = active_threads.size()
-	mutex.unlock()
-	
-	if thread_count >= MAX_THREADS or thread_queue.is_empty():
+	var current_thread_count = active_threads.size()
+	if current_thread_count >= MAX_THREADS or thread_queue.is_empty():
+		mutex.unlock()
 		return
 		
+	# Sort thread queue by priority
+	thread_queue.sort_custom(func(a, b): return get_tile_priority(a.tile_coords) > get_tile_priority(b.tile_coords))
+	
 	var task = thread_queue.pop_front()
 	var thread = Thread.new()
-	thread.start(build_terrain_tile_threaded.bind(task), Thread.PRIORITY_LOW)
-	
-	mutex.lock()
+	thread.start(build_terrain_tile_threaded.bind(task))
 	active_threads.append(thread)
-	mutex.unlock()	
-
+	mutex.unlock()
+	
 func _cleanup_completed_threads() -> void:
 	mutex.lock()
 	var i = active_threads.size() - 1
@@ -279,32 +285,35 @@ func update_terrain_tiles() -> void:
 	)
 	
 	if new_center_tile != current_center_tile or near_edge:
-		# Remove old tiles
+		# Calculate the range of tiles that should exist
+		var required_tiles = {}
+		for x in range(new_center_tile.x - x_tiles/2, new_center_tile.x + x_tiles/2 + 1):
+			for y in range(new_center_tile.y - y_tiles/2, new_center_tile.y + y_tiles/2 + 1):
+				required_tiles[Vector2(x, y)] = true
+
 		mutex.lock()
+		# Remove tiles that are too far away
 		var tiles_to_remove = []
 		for tile_coords in terrain_tiles.keys():
-			if abs(tile_coords.x - new_center_tile.x) > x_tiles/2 or abs(tile_coords.y - new_center_tile.y) > y_tiles/2:
+			if not required_tiles.has(tile_coords):
 				tiles_to_remove.append(tile_coords)
 		
 		for tile_coords in tiles_to_remove:
 			if terrain_tiles.has(tile_coords):
 				terrain_tiles[tile_coords].queue_free()
 				terrain_tiles.erase(tile_coords)
-		mutex.unlock()
-		
-		# Queue new tiles
-		for x in range(new_center_tile.x - x_tiles/2, new_center_tile.x + x_tiles/2 + 1):
-			for y in range(new_center_tile.y - y_tiles/2, new_center_tile.y + y_tiles/2 + 1):
-				var tile_coords = Vector2(x, y)
-				mutex.lock()
+				
+		# Queue new required tiles
+		if thread_queue.size() < MAX_QUEUE_SIZE:
+			for tile_coords in required_tiles:
 				if not terrain_tiles.has(tile_coords) and not pending_tiles.has(tile_coords):
 					pending_tiles[tile_coords] = true
 					var task = TerrainTask.new(tile_coords, terrain_scale, x_size, z_size, terrain_material)
 					thread_queue.append(task)
-				mutex.unlock()
+		mutex.unlock()
 
 	current_center_tile = new_center_tile
-
+		
 func setup_sky():
 	var environment = Environment.new()
 	environment.fog_enabled = true
@@ -367,8 +376,21 @@ func _ready() -> void:
 	if xr_interface and xr_interface.is_initialized():
 		get_viewport().use_xr = true
 
+func cleanup_pending_tiles() -> void:
+	mutex.lock()
+	var tiles_to_remove = []
+	for tile_coords in pending_tiles.keys():
+		if abs(tile_coords.x - current_center_tile.x) > x_tiles/2 or \
+			abs(tile_coords.y - current_center_tile.y) > y_tiles/2:
+			tiles_to_remove.append(tile_coords)
+	
+	for tile_coords in tiles_to_remove:
+		pending_tiles.erase(tile_coords)
+	mutex.unlock()
+
 func _process(_delta: float) -> void:
 	_process_thread_queue()
 	_cleanup_completed_threads()
+	cleanup_pending_tiles()
 	update_terrain_tiles()
 	update_collision_states(xr_origin.global_position)
