@@ -15,6 +15,20 @@ extends Node3D
 @export var gain : float = 0.5
 @export var terain_color : Color;
 
+class TerrainTask:
+	var tile_coords: Vector2
+	var terrain_scale: float
+	var x_size: float
+	var z_size: float
+	var material: Material
+
+	func _init(coords: Vector2, t_scale: float, x_s: float, z_s: float, mat: Material):
+		tile_coords = coords
+		terrain_scale = t_scale
+		x_size = x_s
+		z_size = z_s
+		material = mat
+
 var xr_interface : XRInterface
 var noise = FastNoiseLite.new()
 var terrain_tiles = {}  # Dictionary to store terrain tiles
@@ -22,7 +36,13 @@ var current_center_tile = Vector2.ZERO
 var xr_origin : XROrigin3D
 var terrain_material : StandardMaterial3D 
 
-# Add a buffer zone to prevent reaching tile edges
+var thread_queue := []
+var active_threads := []
+const MAX_THREADS := 4
+var pending_tiles := {}
+var mutex: Mutex
+
+# buffer zone to prevent reaching tile edges
 const TILE_BUFFER : float = 0.2  # 20% buffer from edges
 
 func gaussian_random() -> float:
@@ -127,13 +147,13 @@ func create_terrain_material() -> StandardMaterial3D:
 	
 	return material
 
-func build_terrain_tile(tile_coords: Vector2) -> StaticBody3D:
+func build_terrain_tile_threaded(task: TerrainTask) -> Dictionary:
 	var st = SurfaceTool.new()
 	st.clear()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 
-	var x_origin = tile_coords.x * x_size * terrain_scale
-	var z_origin = tile_coords.y * z_size * terrain_scale
+	var x_origin = task.tile_coords.x * x_size * terrain_scale
+	var z_origin = task.tile_coords.y * z_size * terrain_scale
 	const OVERLAP = 1
 	
 	var vertices_x = int(x_size) + 1 + (2 * OVERLAP)
@@ -173,22 +193,61 @@ func build_terrain_tile(tile_coords: Vector2) -> StaticBody3D:
 	var static_body = StaticBody3D.new()
 	var mesh_instance = MeshInstance3D.new()
 	
-	mesh_instance.mesh = st.commit()
+	return {
+		"mesh": st.commit(),
+		"coords": task.tile_coords
+	}
+
+func _create_terrain_node(result: Dictionary) -> void:
+	var static_body = StaticBody3D.new()
+	var mesh_instance = MeshInstance3D.new()
+	
+	mesh_instance.mesh = result["mesh"]
 	mesh_instance.material_override = terrain_material
 	
-	# Create collision shape
 	var collision_shape = CollisionShape3D.new()
 	var shape = ConcavePolygonShape3D.new()
 	shape.set_faces(mesh_instance.mesh.get_faces())
 	collision_shape.shape = shape
 
-	# Add both mesh and collision to the static body
 	static_body.add_child(mesh_instance)
 	static_body.add_child(collision_shape)
 	add_child(static_body)
 	
-	return static_body
+	mutex.lock()
+	terrain_tiles[result["coords"]] = static_body
+	mutex.unlock()
 
+func _thread_completed(result: Dictionary) -> void:
+	call_deferred("_create_terrain_node", result)
+	
+func _process_thread_queue() -> void:
+	mutex.lock()
+	var thread_count = active_threads.size()
+	mutex.unlock()
+	
+	if thread_count >= MAX_THREADS or thread_queue.is_empty():
+		return
+		
+	var task = thread_queue.pop_front()
+	var thread = Thread.new()
+	thread.start(build_terrain_tile_threaded.bind(task), Thread.PRIORITY_LOW)
+	
+	mutex.lock()
+	active_threads.append(thread)
+	mutex.unlock()	
+
+func _cleanup_completed_threads() -> void:
+	mutex.lock()
+	var i = active_threads.size() - 1
+	while i >= 0:
+		var thread = active_threads[i]
+		if not thread.is_alive():
+			var result = thread.wait_to_finish()
+			_thread_completed(result)
+			active_threads.remove_at(i)
+		i -= 1
+	mutex.unlock()
 
 func get_tile_coords(position: Vector3) -> Vector2:
 	var tile_size = Vector2(x_size * terrain_scale, z_size * terrain_scale)
@@ -213,8 +272,7 @@ func update_terrain_tiles() -> void:
 	var xr_position = xr_origin.global_position
 	var new_center_tile = get_tile_coords(xr_position)
 	var pos_in_tile = get_position_in_tile(xr_position)
-	
-	# Check if player is near the edge of current tile
+
 	var near_edge = (
 		abs(pos_in_tile.x - 0.5) > (0.5 - TILE_BUFFER) or 
 		abs(pos_in_tile.y - 0.5) > (0.5 - TILE_BUFFER)
@@ -222,26 +280,28 @@ func update_terrain_tiles() -> void:
 	
 	if new_center_tile != current_center_tile or near_edge:
 		# Remove old tiles
+		mutex.lock()
 		var tiles_to_remove = []
 		for tile_coords in terrain_tiles.keys():
 			if abs(tile_coords.x - new_center_tile.x) > x_tiles/2 or abs(tile_coords.y - new_center_tile.y) > y_tiles/2:
 				tiles_to_remove.append(tile_coords)
 		
 		for tile_coords in tiles_to_remove:
-			terrain_tiles[tile_coords].queue_free()
-			terrain_tiles.erase(tile_coords)
-
-		for tile_coords in tiles_to_remove:
 			if terrain_tiles.has(tile_coords):
 				terrain_tiles[tile_coords].queue_free()
 				terrain_tiles.erase(tile_coords)
+		mutex.unlock()
 		
-		# Add new tiles
+		# Queue new tiles
 		for x in range(new_center_tile.x - x_tiles/2, new_center_tile.x + x_tiles/2 + 1):
 			for y in range(new_center_tile.y - y_tiles/2, new_center_tile.y + y_tiles/2 + 1):
 				var tile_coords = Vector2(x, y)
-				if not terrain_tiles.has(tile_coords):
-					terrain_tiles[tile_coords] = build_terrain_tile(tile_coords)
+				mutex.lock()
+				if not terrain_tiles.has(tile_coords) and not pending_tiles.has(tile_coords):
+					pending_tiles[tile_coords] = true
+					var task = TerrainTask.new(tile_coords, terrain_scale, x_size, z_size, terrain_material)
+					thread_queue.append(task)
+				mutex.unlock()
 
 	current_center_tile = new_center_tile
 
@@ -267,6 +327,8 @@ func setup_sky():
 	get_viewport().world_3d.environment = environment
 
 func _ready() -> void:
+	mutex = Mutex.new()
+	
 	noise.seed = 12345
 	noise.frequency = hill_frequency
 	noise.fractal_octaves = octaves
@@ -283,15 +345,30 @@ func _ready() -> void:
 	var half_x = x_tiles / 2
 	var half_y = y_tiles / 2
 	
+	# Queue initial terrain tiles for generation
 	for x in range(-half_x, half_x + 1):
 		for y in range(-half_y, half_y + 1):
 			var tile_coords = Vector2(x, y)
-			terrain_tiles[tile_coords] = build_terrain_tile(tile_coords)
+			mutex.lock()
+			if not terrain_tiles.has(tile_coords) and not pending_tiles.has(tile_coords):
+				pending_tiles[tile_coords] = true
+				var task = TerrainTask.new(tile_coords, terrain_scale, x_size, z_size, terrain_material)
+				thread_queue.append(task)
+			mutex.unlock()
+	
+	# Process initial terrain generation
+	while not thread_queue.is_empty() or not active_threads.is_empty():
+		_process_thread_queue()
+		_cleanup_completed_threads()
+		# Add a small delay to prevent blocking
+		await get_tree().create_timer(0.01).timeout
 	
 	xr_interface = XRServer.find_interface("OpenXR")
 	if xr_interface and xr_interface.is_initialized():
 		get_viewport().use_xr = true
 
 func _process(_delta: float) -> void:
+	_process_thread_queue()
+	_cleanup_completed_threads()
 	update_terrain_tiles()
 	update_collision_states(xr_origin.global_position)
