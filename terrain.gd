@@ -45,7 +45,7 @@ var pending_tiles := {}
 var mutex: Mutex
 
 # buffer zone to prevent reaching tile edges
-const TILE_BUFFER : float = 0.2  # 20% buffer from edges
+const TILE_BUFFER : float = 0.3  # 20% buffer from edges
 
 func gaussian_random() -> float:
 	var u1 = randf()
@@ -132,7 +132,8 @@ func create_terrain_material() -> StandardMaterial3D:
 	
 	# Improved texture settings
 	var noise_texture = create_noise_texture()
-	material.albedo_texture = noise_texture
+	#material.albedo_texture = noise_texture
+	material.normal_texture = noise_texture
 	material.normal_enabled = true
 	material.normal_scale = 1.0
 	material.roughness_texture = noise_texture
@@ -317,10 +318,11 @@ func update_terrain_tiles() -> void:
 func setup_sky():
 	var environment = Environment.new()
 	environment.fog_enabled = true
-	environment.fog_density = 0.0075  
-	environment.fog_light_color = terain_color 
-	environment.fog_light_energy = 0.1
-	environment.fog_sun_scatter = 0.0  # Light scattering amount	
+	if environment.fog_enabled:
+		environment.fog_density = 0.004
+		environment.fog_light_color = terain_color 
+		environment.fog_light_energy = 0.1
+		environment.fog_sun_scatter = 0.0  # Light scattering amount	
 	
 	var sky = Sky.new()
 	var sky_material = ProceduralSkyMaterial.new()
