@@ -1,18 +1,19 @@
 extends Node3D
 
-@export var x_tiles : int = 3
-@export var y_tiles : int = 3
-@export var collision_radius : float = 64.0 
-@export var x_size : float = 64
-@export var z_size : float = 64
-@export var terrain_scale : float = 100
-@export var height_mean : float = 1.0
+@export var x_tiles : int = 11
+@export var y_tiles : int = 11
+#@export var collision_radius : float = 64.0 
+@export var x_size : float = 32
+@export var z_size : float = 32
+@export var terrain_scale : float = 5
+@export var height_mean : float = 10.0
 @export var height_std_dev : float = 1.5
-@export var hill_frequency : float = 0.1
-@export var valley_threshold : float = 0.3
-@export var octaves : int = 4
+@export var hill_frequency : float = 0.01
+@export var valley_threshold : float = 0.01
+@export var octaves : int = 16
 @export var lacunarity : float = 2.0
 @export var gain : float = 0.5
+@export var fog_color : Color;
 @export var terain_color : Color;
 
 class TerrainTask:
@@ -43,6 +44,7 @@ var active_threads := []
 const MAX_THREADS := 4
 var pending_tiles := {}
 var mutex: Mutex
+var collision_radius : float = x_size * x_tiles * 0.666 
 
 # buffer zone to prevent reaching tile edges
 const TILE_BUFFER : float = 0.3  # 20% buffer from edges
@@ -75,16 +77,6 @@ func update_collision_states(player_position: Vector3) -> void:
 	var player_tile = get_tile_coords(player_position)
 	
 	for tile_coords in terrain_tiles.keys():
-		# Quick check if tile is definitely outside radius
-		if (abs(tile_coords.x - player_tile.x) > collision_radius / (x_size * terrain_scale) or 
-			abs(tile_coords.y - player_tile.y) > collision_radius / (z_size * terrain_scale)):
-			# Disable collision without precise distance check
-			for child in terrain_tiles[tile_coords].get_children():
-				if child is CollisionShape3D:
-					child.disabled = true
-			continue
-		
-		# Precise distance check for tiles that might be in range
 		var tile = terrain_tiles[tile_coords]
 		var tile_center = Vector3(
 			tile_coords.x * x_size * terrain_scale,
@@ -94,9 +86,12 @@ func update_collision_states(player_position: Vector3) -> void:
 		
 		var distance = player_position.distance_to(tile_center)
 		
+		# Add some buffer to the collision radius
+		var extended_radius = collision_radius # * 1.5
+		
 		for child in tile.get_children():
 			if child is CollisionShape3D:
-				child.disabled = distance > collision_radius
+				child.disabled = distance > extended_radius
 
 func create_noise_texture() -> NoiseTexture2D:
 	var noise_texture = NoiseTexture2D.new()
@@ -192,9 +187,6 @@ func build_terrain_tile_threaded(task: TerrainTask) -> Dictionary:
 
 	st.generate_normals()
 	st.generate_tangents()
-
-	var static_body = StaticBody3D.new()
-	var mesh_instance = MeshInstance3D.new()
 	
 	return {
 		"mesh": st.commit(),
@@ -203,6 +195,10 @@ func build_terrain_tile_threaded(task: TerrainTask) -> Dictionary:
 
 func _create_terrain_node(result: Dictionary) -> void:
 	var static_body = StaticBody3D.new()
+	static_body.collision_layer = 1  # Make sure this matches your collision layer setup
+	static_body.collision_mask = 1
+	static_body.collision_priority = 1.0
+	
 	var mesh_instance = MeshInstance3D.new()
 	
 	mesh_instance.mesh = result["mesh"]
@@ -256,16 +252,16 @@ func _cleanup_completed_threads() -> void:
 		i -= 1
 	mutex.unlock()
 
-func get_tile_coords(position: Vector3) -> Vector2:
+func get_tile_coords(pos: Vector3) -> Vector2:
 	var tile_size = Vector2(x_size * terrain_scale, z_size * terrain_scale)
 	return Vector2(
-		floor(position.x / tile_size.x + 0.5),
-		floor(position.z / tile_size.y + 0.5)
+		floor(pos.x / tile_size.x + 0.5),
+		floor(pos.z / tile_size.y + 0.5)
 	)
 
-func get_position_in_tile(position: Vector3) -> Vector2:
+func get_position_in_tile(pos: Vector3) -> Vector2:
 	var tile_size = Vector2(x_size * terrain_scale, z_size * terrain_scale)
-	var tile_coords = get_tile_coords(position)
+	var tile_coords = get_tile_coords(pos)
 	var tile_origin = Vector2(
 		(tile_coords.x - 0.5) * tile_size.x,
 		(tile_coords.y - 0.5) * tile_size.y
@@ -288,6 +284,7 @@ func update_terrain_tiles() -> void:
 	if new_center_tile != current_center_tile or near_edge:
 		# Calculate the range of tiles that should exist
 		var required_tiles = {}
+
 		for x in range(new_center_tile.x - x_tiles/2, new_center_tile.x + x_tiles/2 + 1):
 			for y in range(new_center_tile.y - y_tiles/2, new_center_tile.y + y_tiles/2 + 1):
 				required_tiles[Vector2(x, y)] = true
@@ -319,8 +316,8 @@ func setup_sky():
 	var environment = Environment.new()
 	environment.fog_enabled = true
 	if environment.fog_enabled:
-		environment.fog_density = 0.004
-		environment.fog_light_color = terain_color 
+		environment.fog_density = 0.002
+		environment.fog_light_color = fog_color 
 		environment.fog_light_energy = 0.1
 		environment.fog_sun_scatter = 0.0  # Light scattering amount	
 	
@@ -338,7 +335,13 @@ func setup_sky():
 	get_viewport().world_3d.environment = environment
 
 func _ready() -> void:
-	mutex = Mutex.new()
+	# init xr stuff
+	xr_interface = XRServer.find_interface("OpenXR")
+	if xr_interface and xr_interface.is_initialized():
+		get_viewport().use_xr = true
+	xr_origin = get_node("./CharacterBody3D/XROrigin3D")
+
+	mutex = Mutex.new() # semiphore for multi-threading
 	
 	noise.seed = 12345
 	noise.frequency = hill_frequency
@@ -347,8 +350,6 @@ func _ready() -> void:
 	noise.fractal_gain = gain
 	
 	terrain_material = create_terrain_material()
-	
-	xr_origin = get_node("./player/XROrigin3D")
 	
 	setup_sky()
 	
@@ -373,10 +374,6 @@ func _ready() -> void:
 		_cleanup_completed_threads()
 		# Add a small delay to prevent blocking
 		await get_tree().create_timer(0.01).timeout
-	
-	xr_interface = XRServer.find_interface("OpenXR")
-	if xr_interface and xr_interface.is_initialized():
-		get_viewport().use_xr = true
 
 func cleanup_pending_tiles() -> void:
 	mutex.lock()
