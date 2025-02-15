@@ -7,7 +7,6 @@ var camera_rotation = Vector2()
 
 func _ready() -> void:
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
-	rotate(Vector3(0.0,0.0,0.0),0.0)
 
 func _process(delta: float) -> void:
 	var direction = Vector3()
@@ -15,7 +14,10 @@ func _process(delta: float) -> void:
 	# Get the camera's forward, right, and up vectors
 	var forward = -global_transform.basis.z
 	var right = global_transform.basis.x
-	var up = global_transform.basis.y
+	
+	# Remove any vertical component for forward/backward movement
+	forward = forward.slide(Vector3.UP).normalized()
+	right = right.normalized()
 	
 	# Apply vectors to direction
 	if Input.is_key_pressed(KEY_W):
@@ -27,9 +29,9 @@ func _process(delta: float) -> void:
 	if Input.is_key_pressed(KEY_D):
 		direction += right
 	if Input.is_key_pressed(KEY_SPACE):
-		direction += up
+		direction += Vector3.UP
 	if Input.is_key_pressed(KEY_CTRL):
-		direction -= up
+		direction -= Vector3.UP
 	
 	var tmp_speed : float = move_speed
 	if Input.is_key_pressed(KEY_SHIFT):
@@ -42,18 +44,18 @@ func _process(delta: float) -> void:
 
 func _input(event):
 	if event is InputEventKey:
-		if event.keycode == KEY_ESCAPE:  
-			get_tree().quit() # press escape to end program
+		if event.keycode == KEY_ESCAPE and event.pressed:  
+			get_tree().quit()
 
 	if event is InputEventMouseMotion:
-		camera_rotation.x += deg_to_rad(-event.relative.x * mouse_sensitivity)
-		camera_rotation.y += deg_to_rad(-event.relative.y * mouse_sensitivity)
-		camera_rotation.y = clamp(camera_rotation.y, deg_to_rad(-89.0), deg_to_rad(89.0))
-
-		var rotation_dir = Vector3(
-			cos(camera_rotation.y) * sin(camera_rotation.x),
-			sin(camera_rotation.y),
-			cos(camera_rotation.y) * cos(camera_rotation.x)
-		)
-
-		look_at(global_transform.origin + rotation_dir, Vector3.UP)
+		# Update camera_rotation
+		camera_rotation.x -= event.relative.x * mouse_sensitivity * 0.01
+		camera_rotation.y -= event.relative.y * mouse_sensitivity * 0.01
+		
+		# Clamp the vertical rotation
+		camera_rotation.y = clamp(camera_rotation.y, deg_to_rad(-89), deg_to_rad(89))
+		
+		# Apply rotations
+		basis = Basis()  # Reset rotation
+		rotate_object_local(Vector3.UP, camera_rotation.x)  # First rotate around Y
+		rotate_object_local(Vector3.RIGHT, camera_rotation.y)  # Then rotate around X
